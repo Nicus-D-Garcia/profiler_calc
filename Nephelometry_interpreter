@@ -1,0 +1,304 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Apr 27 09:00:51 2020
+
+@author: Nicus
+"""
+## Work in progress
+# Complete time series data with some missing dates to achieve a good comparation
+# between nephelometric data with aws Alfa Roca data.
+# Note: Time in UTC
+    
+## Clear all
+from IPython import get_ipython
+get_ipython().magic('reset -sf')
+
+# Import libraryies and open files
+
+import pandas as pd
+import numpy as np
+
+# Opening Nephelometry data || Just download the data from cecs.cl/awsm platform as *.txt || Time in UTC
+tmp = pd.read_csv('F:/Workdoc/2020/Olivares/Nefelometria/Nef.txt', skiprows = 2, index_col = False)
+
+## Patch missing dates (url: https://stackoverflow.com/questions/19324453/add-missing-dates-to-pandas-dataframe) || Nick Edgar response
+## Nomenclature of freq:
+## 1 minutes = 1T
+## 5 minutes = 5T
+## 10 minutes = 10T
+## 1 hour = H | 60T
+## Note: The frequency stablished it can't be bigger than the natural frequency of the serie. In addition,
+## sometimes this solution doesn't work, so it's in evaluation to make a function in the future (with more time).
+
+# Patch data
+tmp.index = pd.DatetimeIndex(tmp['TIMESTAMP']).floor('60T') # Create new column with data every 60 minutes
+all_days = pd.date_range(tmp.index.min(), tmp.index.max(), freq = '60T') # Frequency needed without missing datatime
+df = tmp.reindex(all_days) # Apply reindex to reorder existing data to match a new set of labels, (2) insert new
+# rows where no label previosly existed, (3) fill data for missing labels including by forward/backward filling,
+# (4) select rows by label.
+
+# So, our data is already patched with NaN data even in the date column which isn't necessary, so [...]
+df.TIMESTAMP = all_days # [...] we fix it that here.
+df.reset_index(drop = True, inplace = True) # Finally, we need reset the index column by number of data.
+
+del(tmp, all_days) #Clear variables
+
+# Opening AWS Alfa Roca || Download the data from cecs.cl/awsm platform as *.txt | Time in UTC
+tmp2 = pd.read_csv('F:/Workdoc/2020/Olivares/Nefelometria/AlfaR.txt', skiprows = 1, index_col= False)
+
+# Patch data
+tmp2.index = pd.DatetimeIndex(tmp2['TIMESTAMP']).floor('60T')
+all_days = pd.date_range(tmp2.index.min(), tmp2.index.max(), freq = '60T') # Frequency needed without missing datatime
+aws = tmp2.reindex(all_days)
+aws.TIMESTAMP = all_days # [...] we fix it that here.
+aws.reset_index(drop = True, inplace = True) # Finally, we need reset the index column by number of data.
+
+del(tmp2, all_days)
+
+## Matching dates between aws Alfa Roca (without PP) an df.
+M1 = pd.merge(left = aws, left_on = 'TIMESTAMP', right = df, right_on = 'TIMESTAMP')
+
+# Import modules for reading Matlab files
+from scipy.io import loadmat
+import datetime as dt
+
+# Geonor data | Time in UTC | Data from Pablo, it has a special format and that's why we need to read it in dictionary --> list --> array 
+mat = loadmat('F:/Workdoc/2020/Olivares/Nefelometria/aws_ppcor_Geonor.mat')
+
+my_dict2 = { k: mat[k] for k in ['h3_dppcor']}
+
+# Converting Matlab's datenum format to Python 
+def matlab2datetime(matlab_datenum):
+    day = dt.datetime.fromordinal(int(matlab_datenum))
+    dayfrac = dt.timedelta(days=matlab_datenum%1) - dt.timedelta(days = 366) - dt.timedelta(hours = 0) + dt.timedelta(seconds = 0)
+    return day + dayfrac
+
+# Convert Matlab variable "t" into list of python datetime objects
+my_dict2['date_time'] = [matlab2datetime(tval) for tval in mat['h3_ff'][:,0]]  
+
+# Dictionary format to list format
+tmp = list(my_dict2.items())
+
+# List to array
+data = np.array(tmp)[0][1]
+data = np.asarray(data[:,0])
+time = np.asarray(tmp)[1][1]
+time = np.asarray(time)
+
+# Order data in dataframe format
+df2 = pd.DataFrame({"TIMESTAMP" : time, "PP_Geonor" : data}) 
+
+# Patch data (Idem line 34)
+df2.index = pd.DatetimeIndex(df2['TIMESTAMP']).floor('60T') # Create new column with data every 60 minutes
+all_days = pd.date_range(df2.index.min(), df2.index.max(), freq = '60T') # Define a variable with all the data since min value until max value.
+pp = df2.reindex(all_days) # Create a new dataframe without bumps (bump = nan)
+pp.TIMESTAMP = all_days # Stablish the new TIMESTAMP with all the hours
+pp.reset_index(drop = True, inplace = True) # Reset index column, now start from 0 until len()- 1
+
+del(df2, all_days, tmp, data, my_dict2, mat)
+
+## Mix it (with PP)
+Mix = pd.merge(left = M1, left_on = 'TIMESTAMP', right = pp, right_on = 'TIMESTAMP')
+
+## Filters | Bateria > 12 V | Humedad relativa < 50% | Velocidad del viento > 3 m/s | Error == 0 (no error) | PP (no available yet)
+tmp = Mix.loc[(Mix['BattV_01_010_Avg'] > 12) & (Mix['RH_01_020_Avg'] < 50) & (Mix['WS_1_020_S_WVT'] > 3) & (Mix[' Bateria'] > 12) & (Mix[' Error'] == 0)]
+Filter = tmp.dropna(thresh = 2)
+
+del(tmp)
+
+# Work in local hour
+Filter['TIMESTAMP'] = Filter['TIMESTAMP'] - dt.timedelta(hours = 4)
+
+# Patch the serie to see the real values availables
+Filter.index = pd.DatetimeIndex(Filter['TIMESTAMP']).floor('60T')
+all_days = pd.date_range(Filter.index.min(), Filter.index.max(), freq = '60T')
+Patch = Filter.reindex(all_days)
+Patch.TIMESTAMP = all_days
+Patch.reset_index(drop = True, inplace = True)
+
+del(all_days)
+
+# As line 116 of matlab scripts count_mas_profiler.m, assign:
+zdat = Filter.iloc[:,15:23]
+zdatp = Patch.iloc[:,15:23]
+
+ztime = Filter.iloc[:,0]
+ztimep = Patch.iloc[:,0]
+
+# Plot filtered data
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+
+fig, ax = plt.subplots()
+
+line1, = ax.plot(ztimep, zdatp.iloc[:,0], label ='$0.3$ $ug/m^3$')
+line1.set_dashes([2, 2, 10, 2])  # 2pt line, 2pt break, 10pt line, 2pt break
+
+line2, = ax.plot(ztimep, zdatp.iloc[:,1], label ='$0.5$ $ug/m^3$')
+line2.set_dashes([2, 2, 10, 2])  # 2pt line, 2pt break, 10pt line, 2pt break
+
+line3, = ax.plot(ztimep, zdatp.iloc[:,2], label ='$0.7$ $ug/m^3$')
+line3.set_dashes([2, 2, 10, 2])  # 2pt line, 2pt break, 10pt line, 2pt break
+
+line4, = ax.plot(ztimep, zdatp.iloc[:,3], label ='$1.0$ $ug/m^3$')
+line4.set_dashes([2, 2, 10, 2])  # 2pt line, 2pt break, 10pt line, 2pt break
+
+line5, = ax.plot(ztimep, zdatp.iloc[:,4], label ='$2.0$ $ug/m^3$')
+line5.set_dashes([2, 2, 10, 2])  # 2pt line, 2pt break, 10pt line, 2pt break
+
+line6, = ax.plot(ztimep, zdatp.iloc[:,5], label ='$3.0$ $ug/m^3$')
+line6.set_dashes([2, 2, 10, 2])  # 2pt line, 2pt break, 10pt line, 2pt break
+
+line7, = ax.plot(ztimep, zdatp.iloc[:,6], label ='$5.0$ $ug/m^3$')
+line7.set_dashes([2, 2, 10, 2])  # 2pt line, 2pt break, 10pt line, 2pt break
+
+line8, = ax.plot(ztimep, zdatp.iloc[:,7], label ='$10.0$ $ug/m^3$')
+line8.set_dashes([2, 2, 10, 2])  # 2pt line, 2pt break, 10pt line, 2pt break
+
+# Setting Time Format
+plt.gcf().autofmt_xdate()
+myFmt = mdates.DateFormatter('%d-%m-%y')
+plt.gca().xaxis.set_major_formatter(myFmt)
+
+ax.grid(True, linestyle = '-.') # Grid on
+ax.set_ylabel('Raw Data') # Y-label name
+ax.legend(loc = 1, prop = {'size': 5}) # Position and size letter of legend
+
+fig.savefig('Raw_data.png', dpi = (300), bbox_inches = 'tight') # Save image, dpi = resolution, bbox format
+plt.show()
+
+plt.close(fig) 
+del(fig, ax)
+###
+
+# Define segments by size 'cause the sensor measurement do an accumulative
+# counting when define the data of each bin. /Correct this explantion plz.
+xvar1 = zdat.iloc[:,0] - zdat.iloc[:,1] # 0.3 - 0.5
+xvar2 = zdat.iloc[:,1] - zdat.iloc[:,2] # 0.5 - 0.7
+xvar3 = zdat.iloc[:,2] - zdat.iloc[:,3] # .
+xvar4 = zdat.iloc[:,3] - zdat.iloc[:,4] # .
+xvar5 = zdat.iloc[:,4] - zdat.iloc[:,5] # .
+xvar6 = zdat.iloc[:,5] - zdat.iloc[:,6] # .
+xvar7 = zdat.iloc[:,6] - zdat.iloc[:,7] # 5 - 10
+
+# Dataframe of each segment
+x = {'TIMESTAMP' : ztime, 'z03_05' : xvar1, 'z05_07' : xvar2, # Ordering data
+                 'z07_1' : xvar3, 'z1_2' : xvar4, 'z2_3' : xvar5,
+                 'z3_5' : xvar6, 'z5_10' : xvar7}
+
+X = pd.DataFrame(x); del(x) # Creating Dataframe
+X.reset_index(drop = True, inplace = True) # Reset index values, dates --> index
+
+# Size of breakpoints of each segment
+xsize = np.array([0.3, 0.5, 0.7, 1, 2, 3, 5, 10])
+# Diameters design as half of each segment
+diameter = np.array([0.4, 0.6, 0.85, 1.5, 2.5, 4.0, 7.5])
+
+## Information for estimation of mass from profiler
+rho = 1.65 # g/cm^3 -- From Wittmaack(2002)
+pi = np.pi
+factor_conver = 10**(-4) # [um] --> [cm]
+volumen = (4/3) * pi * (diameter * factor_conver/2)**3 # Sphere volume
+mass_g = volumen * rho # [cm3]*[g/cm3] -> [g]
+mass_ug = mass_g * 10**6 # g --> ug
+
+# For later?
+delta_log = [np.log10(0.5) - np.log10(0.3),
+             np.log10(0.7) - np.log10(0.5),
+             np.log10(1) - np.log10(0.7),
+             np.log10(2) - np.log10(1),
+             np.log10(3) - np.log10(2),
+             np.log10(5) - np.log10(3),
+             np.log10(10) - np.log10(5)]
+
+## Concentration of ug/m3
+m = X.shape[0] # Size of matrix X
+n = len(diameter) # Length of array diameter
+tmp = np.zeros((m,n)) # Auxiliar matrix of zeros to save the result of the loop
+
+for jj in range(0,n):
+    tmp[:,jj] = mass_ug[jj] * X.iloc[:,jj+1] * 1000 # Mass[ug] * Quantity of particles * 1000 = [ug/m3]
+    # print(jj)  
+del(m,n)    
+
+# Auxiliar Matrix with values < 2.5
+aux = tmp[:,0:5] 
+   
+# MP10 & MP2.5 (Sum of concentrations)
+mp10 = [sum(row) for row in tmp] # line 30th of this dataframe is comparable with variable x.mp10, line 3 to ahead (Matlab variable)
+mp25 = [sum(row) for row in aux] # line 30th of this dataframe is comparable with variable x.mp25, line 3 to ahead (Matlab variable)
+
+# Plot of M10 & MP2.5
+fig, ax = plt.subplots()
+
+line1, = ax.plot(ztime, mp10, label = 'MP10')
+line1.set_dashes([2, 2, 10, 2])  # 2pt line, 2pt break, 10pt line, 2pt break
+
+line2, = ax.plot(ztime, mp25, label = 'MP2.5')
+line2.set_dashes([2, 2, 10, 2])  # 2pt line, 2pt break, 10pt line, 2pt break
+
+line3, = ax.plot(ztime, tmp[:,0], label = 'MP0.5')
+line3.set_dashes([2, 2, 10, 2])  # 2pt line, 2pt break, 10pt line, 2pt break
+
+# Setting Time Format
+plt.gcf().autofmt_xdate()
+myFmt = mdates.DateFormatter('%d-%m-%y')
+plt.gca().xaxis.set_major_formatter(myFmt)
+
+ax.grid(True, linestyle = '-.')
+ax.set_ylabel(r'MP ($\mu$$g$ $m^{-3}$)')
+ax.legend(loc = 1, prop = {'size': 8})
+
+fig.savefig('MP.png', dpi = (300), bbox_inches = 'tight')
+plt.show()
+plt.close()
+
+del(tmp, fig, ax)
+
+# Dataframe with the first analysis of MP
+tmp = {'TIMESTAMP' : ztime, 'MP10' : mp10, 'MP2.5' : mp25}
+mp = pd.DataFrame(tmp)
+
+del(tmp)
+
+# Gruop by --> Simple method to calculate means
+dmp = mp.groupby(pd.Grouper(freq = '1D')).mean() # Daily
+hmp = mp.groupby(mp.index.hour).mean() # Hourly
+
+# Plot of daily values with available data (No NaN data)
+fig2, ax2 = plt.subplots()
+
+line1, = ax2.plot(dmp.iloc[:,0], label = 'Daily MP10')
+line1.set_dashes([2, 2, 10, 2])
+
+line2, = ax2.plot(dmp.iloc[:,1], label = 'Daily MP2.5')
+line2.set_dashes([2, 2, 10, 2])
+
+# Setting Time Format
+plt.gcf().autofmt_xdate()
+myFmt = mdates.DateFormatter('%d-%m-%y')
+plt.gca().xaxis.set_major_formatter(myFmt)
+
+ax2.grid(True, linestyle = '-')
+ax2.set_ylabel(r'MP ($\mu$$g$ $m^{-3})$')
+ax2.legend(loc = 1, prop = {'size' : 8})
+
+plt.show()
+
+del(line1, line2)
+
+# Plot of hourly data with available data (No NaN's)
+fig3, ax3 = plt.subplots()
+
+line1, = ax3.plot(hmp.iloc[:,0], label = 'Hourly MP10')
+line1.set_dashes([2, 2, 10, 2])
+
+line2, = ax3.plot(hmp.iloc[:,1], label = 'Hourly MP2.5')
+line2.set_dashes([2, 2, 10, 2])
+
+ax3.grid(True, linestyle = '-') 
+ax3.set_ylabel(r'MP ($\mu$$g$ $m^{-3})$')
+ax3.set_xlabel(r'Local Hour')
+ax3.legend(loc = 1, prop = {'size' : 8})
+
+plt.show()
